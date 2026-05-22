@@ -3,6 +3,10 @@
 This document describes the customizations added on top of Open WebUI to
 integrate ARCHGPU bridge model management directly inside the existing WebUI.
 
+Related bridge backend repository (runtime/service side):
+
+- [https://github.com/nitty01/archgpu-ollama-bridge](https://github.com/nitty01/archgpu-ollama-bridge)
+
 ## What Is Customized
 
 The following custom behavior is added:
@@ -19,6 +23,16 @@ The following custom behavior is added:
   - metadata (freshness/downloads/likes/publisher/pipeline)
   - quality filters (trusted publishers + thresholds)
   - runtime fit recommendations (download guidance)
+
+## Why These Changes Were Made
+
+- Keep the full model lifecycle inside WebUI so users do not need a separate
+  bridge management UI.
+- Expose richer model metadata and quality signals to improve model selection.
+- Surface runtime-fit guidance so users avoid downloading models likely to be
+  too heavy for their system profile.
+- Make disk cleanup practical with direct delete actions for bridge-managed
+  dynamic models.
 
 ## Files Changed
 

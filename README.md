@@ -56,6 +56,10 @@ What was added in this fork:
 Implementation details and operational notes are documented in
 `ARCHGPU_BRIDGE_INTEGRATION.md`.
 
+Bridge backend/reference repository:
+
+- [https://github.com/nitty01/archgpu-ollama-bridge](https://github.com/nitty01/archgpu-ollama-bridge)
+
 ## Key Features of Open WebUI ⭐
 
 - 🚀 **Effortless Setup**: Install seamlessly using Docker or Kubernetes (kubectl, kustomize or helm) for a hassle-free experience with support for both `:ollama` and `:cuda` tagged images.
