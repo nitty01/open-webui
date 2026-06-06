@@ -2,6 +2,7 @@
 	import { getContext, onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
+		controlOllamaPull,
 		deleteModel,
 		getOllamaCatalogue,
 		getOllamaPullStatus,
@@ -16,12 +17,15 @@
 	let models: any[] = [];
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let pulling: Record<string, { status: string; progress?: number }> = {};
+	let pullStatusesRaw: any[] = [];
 	let liveDiscovery = true;
 	let trustedOnly = false;
 	let minDownloads = 0;
 	let minLikes = 0;
 	let qualityMode = 'off';
 	let systemProfile: { ram_gb?: number | null; gpu_vram_gb?: number | null } | null = null;
+	const ACTIVE_PROBE_WINDOW_MS = 30000;
+	let controlSelection: Record<string, string> = {};
 
 	const loadCatalogue = async (forceRefresh = false) => {
 		loading = true;
@@ -38,6 +42,7 @@
 				}),
 				getOllamaPullStatus(localStorage.token, null, 0)
 			]);
+			pullStatusesRaw = pullStatuses ?? [];
 
 			const statusMap = Object.fromEntries((pullStatuses ?? []).map((s) => [s.model, s]));
 			systemProfile = catalogue?.system_profile ?? null;
@@ -100,11 +105,112 @@
 		return null;
 	};
 
+	const getRawProgress = (s: any) => {
+		if (s?.total && typeof s?.completed === 'number' && s.total > 0) {
+			return Math.max(0, Math.min(100, Math.round((s.completed / s.total) * 100)));
+		}
+		return null;
+	};
+
+	const normalizeStatus = (status: string | null | undefined) => (status ?? '').toLowerCase();
+
+	const isFailedStatus = (status: string | null | undefined) => {
+		const s = normalizeStatus(status);
+		return s.includes('error') || s.includes('fail');
+	};
+
+	const isSuccessStatus = (status: string | null | undefined) => {
+		const s = normalizeStatus(status);
+		return s === 'success' || s === 'done' || s.includes('complete');
+	};
+
+	const getProbeState = (m: any) => {
+		const status = normalizeStatus(m?.pull_status?.status);
+		if (!status) return null;
+		if (status.includes('pause')) return 'paused';
+		if (status.includes('suspend')) return 'suspended';
+		if (isFailedStatus(status)) return 'failed';
+		if (isSuccessStatus(status)) return 'completed';
+
+		// If backend marks it as downloading/pulling, probe recency via updated_at heartbeat.
+		if (status.includes('download') || status.includes('pull')) {
+			const updatedAtRaw = m?.pull_status?.updated_at;
+			if (!updatedAtRaw) return 'suspended';
+			const updatedAt = new Date(updatedAtRaw).getTime();
+			if (Number.isNaN(updatedAt)) return 'suspended';
+			return Date.now() - updatedAt <= ACTIVE_PROBE_WINDOW_MS ? 'active' : 'suspended';
+		}
+
+		return status;
+	};
+
+	const getProbeClass = (probe: string | null) => {
+		if (!probe) return 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300';
+		if (probe === 'active')
+			return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+		if (probe === 'paused')
+			return 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300';
+		if (probe === 'suspended')
+			return 'bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300';
+		if (probe === 'failed')
+			return 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+		if (probe === 'completed')
+			return 'bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300';
+		return 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300';
+	};
+
+	const probeModel = async (m: any) => {
+		try {
+			const modelKey = m.pull_name ?? m.alias ?? m.installed_as;
+			const statuses = await getOllamaPullStatus(localStorage.token, modelKey, 0);
+			const status = (statuses ?? [])[0] ?? null;
+			models = models.map((row) =>
+				row.alias === m.alias ? { ...row, pull_status: status ?? row.pull_status } : row
+			);
+			if (!status) {
+				toast.info($i18n.t('No active pull status found for {{model}}', { model: modelKey }));
+			}
+		} catch (e: any) {
+			toast.error($i18n.t('Probe failed: {{error}}', { error: e?.message ?? e }));
+		}
+	};
+
+	const getStatusBadgeClass = (status: string | null | undefined) => {
+		if (isFailedStatus(status)) {
+			return 'bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300';
+		}
+		if (isSuccessStatus(status)) {
+			return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300';
+		}
+		if (status) {
+			return 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300';
+		}
+		return 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300';
+	};
+
+	const getStatusTextClass = (status: string | null | undefined) => {
+		if (isFailedStatus(status)) return 'text-red-600 dark:text-red-300';
+		if (isSuccessStatus(status)) return 'text-emerald-600 dark:text-emerald-300';
+		if (status) return 'text-amber-600 dark:text-amber-300';
+		return 'text-gray-500 dark:text-gray-400';
+	};
+
+	const getProgressBarClass = (status: string | null | undefined) => {
+		if (isFailedStatus(status)) {
+			return 'bg-red-500';
+		}
+		if (isSuccessStatus(status)) {
+			return 'bg-emerald-500';
+		}
+		return 'bg-amber-500';
+	};
+
 	const startPull = async (pullName: string) => {
 		if (pulling[pullName]) return;
 		pulling = { ...pulling, [pullName]: { status: 'starting' } };
 
 		try {
+			toast.success($i18n.t('Download started for {{alias}}', { alias: pullName }));
 			const [res] = await pullModel(localStorage.token, pullName, 0);
 			const reader = res?.body?.pipeThrough(new TextDecoderStream()).getReader();
 			let buffer = '';
@@ -142,7 +248,7 @@
 				}
 			}
 
-			toast.success($i18n.t('Download started for {{alias}}', { alias: pullName }));
+			toast.success($i18n.t('Download stream completed for {{alias}}', { alias: pullName }));
 		} catch (e: any) {
 			toast.error($i18n.t('Download failed: {{error}}', { error: e?.message ?? e }));
 		} finally {
@@ -166,6 +272,131 @@
 			await loadCatalogue();
 		} catch (e: any) {
 			toast.error($i18n.t('Delete failed: {{error}}', { error: e?.message ?? e }));
+		}
+	};
+
+	const controlPull = async (
+		m: any,
+		action: 'stop' | 'pause' | 'resume' | 'restart' | 'purge' | 'delete' | 'clear'
+	) => {
+		const modelKey = m.pull_name ?? m.alias ?? m.installed_as;
+		if (!modelKey) return;
+		try {
+			await controlOllamaPull(localStorage.token, modelKey, action, 0);
+			if (action === 'stop' || action === 'pause') {
+				toast.success($i18n.t('Stopped {{model}}', { model: modelKey }));
+			} else if (action === 'resume') {
+				toast.success($i18n.t('Resumed {{model}}', { model: modelKey }));
+			} else if (action === 'restart') {
+				toast.success($i18n.t('Restarted {{model}}', { model: modelKey }));
+			} else if (action === 'clear') {
+				toast.success($i18n.t('Cleared status for {{model}}', { model: modelKey }));
+			} else {
+				toast.success($i18n.t('Purged {{model}} from system', { model: modelKey }));
+			}
+			await loadCatalogue();
+		} catch (e: any) {
+			toast.error($i18n.t('Control action failed: {{error}}', { error: e?.message ?? e }));
+		}
+	};
+
+	const getControlKey = (m: any) => m.pull_name ?? m.alias ?? m.installed_as ?? '';
+
+	const getAvailableActions = (m: any) =>
+		(m.pull_status?.actions ?? []).filter((a: string) =>
+			['stop', 'pause', 'resume', 'restart', 'purge', 'clear'].includes(a)
+		);
+
+	const getQuickAction = (m: any): 'stop' | 'pause' | 'resume' | 'restart' | null => {
+		const actions = getAvailableActions(m);
+		if (actions.includes('stop')) return 'stop';
+		if (actions.includes('pause')) return 'pause';
+		if (actions.includes('resume')) return 'resume';
+		if (actions.includes('restart')) return 'restart';
+		return null;
+	};
+
+	const actionLabel = (action: string) => {
+		if (action === 'stop' || action === 'pause') return $i18n.t('Stop');
+		if (action === 'resume') return $i18n.t('Resume');
+		if (action === 'restart') return $i18n.t('Restart');
+		if (action === 'purge') return $i18n.t('Purge');
+		if (action === 'clear') return $i18n.t('Clear');
+		return action;
+	};
+
+	const setSelectedControl = (m: any, value: string) => {
+		const key = getControlKey(m);
+		controlSelection = {
+			...controlSelection,
+			[key]: value
+		};
+	};
+
+	const getSelectedControl = (m: any) => {
+		const key = getControlKey(m);
+		return controlSelection[key] ?? '';
+	};
+
+	const runSelectedControl = async (m: any) => {
+		const selected = getSelectedControl(m);
+		if (!selected) return;
+		await controlPull(m, selected as 'stop' | 'pause' | 'resume' | 'restart' | 'purge' | 'clear');
+		setSelectedControl(m, '');
+	};
+
+	const getRawAvailableActions = (s: any) =>
+		(s?.actions ?? []).filter((a: string) =>
+			['stop', 'pause', 'resume', 'restart', 'purge', 'clear'].includes(a)
+		);
+
+	const getRawQuickAction = (s: any): 'stop' | 'pause' | 'resume' | 'restart' | null => {
+		const actions = getRawAvailableActions(s);
+		if (actions.includes('stop')) return 'stop';
+		if (actions.includes('pause')) return 'pause';
+		if (actions.includes('resume')) return 'resume';
+		if (actions.includes('restart')) return 'restart';
+		return null;
+	};
+
+	const setRawSelectedControl = (model: string, value: string) => {
+		controlSelection = {
+			...controlSelection,
+			[model]: value
+		};
+	};
+
+	const getRawSelectedControl = (model: string) => controlSelection[model] ?? '';
+
+	const runRawSelectedControl = async (s: any) => {
+		const modelKey = s?.model;
+		const selected = getRawSelectedControl(modelKey);
+		if (!modelKey || !selected) return;
+		try {
+			await controlOllamaPull(
+				localStorage.token,
+				modelKey,
+				selected as 'stop' | 'pause' | 'resume' | 'restart' | 'purge' | 'clear',
+				0
+			);
+			toast.success($i18n.t('{{action}} applied to {{model}}', { action: actionLabel(selected), model: modelKey }));
+			setRawSelectedControl(modelKey, '');
+			await loadCatalogue();
+		} catch (e: any) {
+			toast.error($i18n.t('Control action failed: {{error}}', { error: e?.message ?? e }));
+		}
+	};
+
+	const runRawQuickAction = async (s: any) => {
+		const modelKey = s?.model;
+		const action = getRawQuickAction(s);
+		if (!modelKey || !action) return;
+		try {
+			await controlOllamaPull(localStorage.token, modelKey, action, 0);
+			toast.success($i18n.t('{{action}} applied to {{model}}', { action: actionLabel(action), model: modelKey }));
+			await loadCatalogue();
+		} catch (e: any) {
+			toast.error($i18n.t('Control action failed: {{error}}', { error: e?.message ?? e }));
 		}
 	};
 
@@ -256,6 +487,72 @@
 	</div>
 
 	<div class="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+		{#if pullStatusesRaw.length > 0}
+			<div class="px-3 py-2 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/70">
+				<div class="text-[0.7rem] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+					{$i18n.t('Transfer Status')}
+				</div>
+				<div class="mt-2 grid gap-1.5">
+					{#each pullStatusesRaw as s (s.model)}
+						<div class="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950/40 px-2.5 py-1.5">
+							<div class="flex items-center justify-between gap-2">
+								<div class="min-w-0">
+									<div class="truncate font-medium">{s.model}</div>
+									<div class={`text-[0.7rem] ${getStatusTextClass(s.status)}`}>
+										{s.status}
+									</div>
+								</div>
+								{#if getRawProgress(s) !== null}
+									<div class="text-xs text-gray-500 dark:text-gray-400">{getRawProgress(s)}%</div>
+								{/if}
+							</div>
+							{#if getRawAvailableActions(s).length > 0}
+								<div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+									{#if getRawQuickAction(s)}
+										<button
+											class="px-2 py-1 rounded-lg border border-blue-500 text-blue-700 dark:text-blue-300 text-[0.7rem]"
+											on:click={() => runRawQuickAction(s)}
+										>
+											{actionLabel(getRawQuickAction(s))}
+										</button>
+									{/if}
+									<select
+										class="min-w-[7rem] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 border border-gray-300 dark:border-gray-700 text-[0.7rem] outline-hidden"
+										value={getRawSelectedControl(s.model)}
+										on:change={(e) => setRawSelectedControl(s.model, e.currentTarget.value)}
+									>
+										<option value="">{`${$i18n.t('More controls')}...`}</option>
+										{#each getRawAvailableActions(s) as action}
+											{#if action !== getRawQuickAction(s)}
+												<option value={action}>{actionLabel(action)}</option>
+											{/if}
+										{/each}
+									</select>
+									<button
+										class="px-2 py-1 rounded-lg border border-gray-500 text-gray-700 dark:text-gray-200 text-[0.7rem] disabled:opacity-40"
+										disabled={!getRawSelectedControl(s.model)}
+										on:click={() => runRawSelectedControl(s)}
+									>
+										{$i18n.t('Run')}
+									</button>
+								</div>
+							{/if}
+							{#if getRawProgress(s) !== null}
+								<div class="mt-1 h-1.5 w-full rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+									<div
+										class={`h-full rounded-full transition-all duration-300 ${getProgressBarClass(s.status)}`}
+										style={`width: ${getRawProgress(s)}%`}
+									></div>
+								</div>
+							{/if}
+							{#if s.error}
+								<div class="mt-1 text-[0.7rem] text-red-600 dark:text-red-300 break-words">{s.error}</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
 		<div class="max-h-[65vh] overflow-auto">
 			<table class="w-full text-left text-xs">
 				<thead class="sticky top-0 bg-gray-50 dark:bg-gray-900/95">
@@ -319,29 +616,102 @@
 										{/if}
 									{/if}
 									{#if m.pull_status?.status}
-										<div class="text-gray-500 dark:text-gray-400 mt-1">{m.pull_status.status}</div>
+										<div class="mt-1">
+											<span
+												class={`inline-flex items-center rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${getStatusBadgeClass(
+													m.pull_status.status
+												)}`}
+											>
+												{m.pull_status.status}
+											</span>
+										</div>
 									{/if}
 									{#if getProgress(m) !== null}
 										<div class="mt-1 text-gray-500 dark:text-gray-400">{getProgress(m)}%</div>
+										<div class="mt-1 h-1.5 w-full rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+											<div
+												class={`h-full rounded-full transition-all duration-300 ${getProgressBarClass(
+													m.pull_status?.status
+												)}`}
+												style={`width: ${getProgress(m)}%`}
+											></div>
+										</div>
+									{/if}
+									{#if getProbeState(m)}
+										<div class="mt-1">
+											<span
+												class={`inline-flex items-center rounded-full px-2 py-0.5 text-[0.65rem] font-medium ${getProbeClass(
+													getProbeState(m)
+												)}`}
+											>
+												{$i18n.t('Probe')}: {getProbeState(m)}
+											</span>
+										</div>
+									{/if}
+									{#if m.pull_status?.error}
+										<div class="mt-1 text-red-600 dark:text-red-300 break-words">
+											{m.pull_status.error}
+										</div>
 									{/if}
 								</td>
 								<td class="px-3 py-2 min-w-[160px]">
-									<div class="flex gap-2">
+									<div class="space-y-1.5">
+										<div class="flex flex-wrap gap-1.5">
 										{#if m.downloadable}
 											<button
-												class="px-2 py-1 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900"
+												class="px-2 py-1 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 text-[0.7rem]"
 												on:click={() => startPull(m.pull_name ?? m.alias)}
 											>
 												{$i18n.t('Download')}
 											</button>
 										{/if}
+										{#if m.pull_status?.status}
+											{#if getQuickAction(m)}
+												<button
+													class="px-2 py-1 rounded-lg border border-blue-500 text-blue-700 dark:text-blue-300 text-[0.7rem]"
+													on:click={() => controlPull(m, getQuickAction(m))}
+												>
+													{actionLabel(getQuickAction(m))}
+												</button>
+											{/if}
+											<button
+												class="px-2 py-1 rounded-lg border border-gray-400 text-gray-700 dark:text-gray-200 text-[0.7rem]"
+												on:click={() => probeModel(m)}
+											>
+												{$i18n.t('Probe')}
+											</button>
+										{/if}
 										{#if m.installed && m.deletable !== false}
 											<button
-												class="px-2 py-1 rounded-lg border border-red-400 text-red-600 dark:text-red-300"
+												class="px-2 py-1 rounded-lg border border-red-500 bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300 text-[0.7rem]"
 												on:click={() => removeModel(m)}
 											>
-												{$i18n.t('Delete')}
+												{$i18n.t('Delete from system')}
 											</button>
+										{/if}
+										</div>
+										{#if getAvailableActions(m).length > 0}
+											<div class="flex items-center gap-1.5">
+												<select
+													class="min-w-[7rem] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 border border-gray-300 dark:border-gray-700 text-[0.7rem] outline-hidden"
+													value={getSelectedControl(m)}
+													on:change={(e) => setSelectedControl(m, e.currentTarget.value)}
+												>
+													<option value="">{`${$i18n.t('More controls')}...`}</option>
+													{#each getAvailableActions(m) as action}
+														{#if action !== getQuickAction(m)}
+															<option value={action}>{actionLabel(action)}</option>
+														{/if}
+													{/each}
+												</select>
+												<button
+													class="px-2 py-1 rounded-lg border border-gray-500 text-gray-700 dark:text-gray-200 text-[0.7rem] disabled:opacity-40"
+													disabled={!getSelectedControl(m)}
+													on:click={() => runSelectedControl(m)}
+												>
+													{$i18n.t('Run')}
+												</button>
+											</div>
 										{/if}
 									</div>
 								</td>

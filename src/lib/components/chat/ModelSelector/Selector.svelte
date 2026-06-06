@@ -10,12 +10,13 @@
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import { flyAndScale } from '$lib/utils/transitions';
 
-	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount, getContext, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 
 	import {
 		deleteModel,
 		getOllamaCatalogue,
+		getOllamaPullStatus,
 		getOllamaVersion,
 		pullModel
 	} from '$lib/apis/ollama';
@@ -130,6 +131,8 @@
 
 	let tags = [];
 	let catalogueModels = [];
+	let remotePullStatuses: Record<string, any> = {};
+	let pullStatusTimer: ReturnType<typeof setInterval> | null = null;
 
 	let selectedModel = '';
 	$: selectedModel = items.find((item) => item.value === value) ?? '';
@@ -265,10 +268,101 @@
 
 	const loadCatalogue = async () => {
 		try {
-			catalogueModels = await getOllamaCatalogue(localStorage.token, 0);
+			const [catalogue, statuses] = await Promise.all([
+				getOllamaCatalogue(localStorage.token, 0),
+				getOllamaPullStatus(localStorage.token, null, 0)
+			]);
+			const statusMap = Object.fromEntries((statuses ?? []).map((s) => [s.model, s]));
+			remotePullStatuses = statusMap;
+			catalogueModels = (catalogue ?? []).map((model) => ({
+				...model,
+				pull_status:
+					model?.pull_status ??
+					statusMap[model?.pull_name ?? ''] ??
+					statusMap[model?.alias ?? ''] ??
+					statusMap[model?.installed_as ?? '']
+			}));
 		} catch (e) {
 			console.error(e);
 			catalogueModels = [];
+		}
+	};
+
+	const refreshRemotePullStatuses = async () => {
+		try {
+			const statuses = await getOllamaPullStatus(localStorage.token, null, 0);
+			const statusMap = Object.fromEntries((statuses ?? []).map((s) => [s.model, s]));
+			remotePullStatuses = statusMap;
+			catalogueModels = (catalogueModels ?? []).map((model) => ({
+				...model,
+				pull_status:
+					model?.pull_status ??
+					statusMap[model?.pull_name ?? ''] ??
+					statusMap[model?.alias ?? ''] ??
+					statusMap[model?.installed_as ?? '']
+			}));
+		} catch (e) {
+			console.error(e);
+		}
+	};
+
+	const getRemotePullState = (model: any) =>
+		model?.pull_status ??
+		remotePullStatuses[model?.pull_name ?? ''] ??
+		remotePullStatuses[model?.alias ?? ''] ??
+		remotePullStatuses[model?.installed_as ?? ''] ??
+		null;
+
+	const getRemotePullProgress = (model: any) => {
+		const state = getRemotePullState(model);
+		if (state?.total && typeof state?.completed === 'number' && state.total > 0) {
+			return Math.max(0, Math.min(100, Math.round((state.completed / state.total) * 100)));
+		}
+		return null;
+	};
+
+	const isTerminalPullStatus = (status: string | undefined) => {
+		if (!status) return false;
+		const normalized = status.toLowerCase();
+		return normalized === 'success' || normalized === 'done' || normalized === 'completed';
+	};
+
+	const isFailedPullStatus = (status: string | undefined) => {
+		if (!status) return false;
+		const normalized = status.toLowerCase();
+		return normalized.includes('fail') || normalized.includes('error');
+	};
+
+	const pullStatusTextClass = (status: string | undefined) => {
+		if (isFailedPullStatus(status)) return 'text-red-600 dark:text-red-300';
+		if (isTerminalPullStatus(status)) return 'text-emerald-600 dark:text-emerald-300';
+		return 'text-amber-600 dark:text-amber-300';
+	};
+
+	const pullProgressBarClass = (status: string | undefined) => {
+		if (isFailedPullStatus(status)) return 'bg-red-500';
+		if (isTerminalPullStatus(status)) return 'bg-emerald-500';
+		return 'bg-amber-500';
+	};
+
+	const isRemotelyDownloading = (model: any) => {
+		const state = getRemotePullState(model);
+		if (!state?.status) return false;
+		return !isTerminalPullStatus(state.status) && !isFailedPullStatus(state.status);
+	};
+
+	const cleanupRemotePullModel = async (model: string) => {
+		try {
+			await deleteModel(localStorage.token, model);
+			toast.success($i18n.t('Deleted {{model}}', { model }));
+			await refreshRemotePullStatuses();
+			await loadCatalogue();
+		} catch (error: any) {
+			toast.error(
+				$i18n.t('Delete failed: {{error}}', {
+					error: error?.message ?? error
+				})
+			);
 		}
 	};
 
@@ -421,6 +515,13 @@
 		await loadCatalogue();
 	});
 
+	onDestroy(() => {
+		if (pullStatusTimer) {
+			clearInterval(pullStatusTimer);
+			pullStatusTimer = null;
+		}
+	});
+
 	const cancelModelPullHandler = async (model: string) => {
 		const { reader, abortController } = $MODEL_DOWNLOAD_POOL[model];
 		if (abortController) {
@@ -502,6 +603,25 @@
 		const haystack = `${model?.alias ?? ''} ${model?.display_name ?? ''} ${(model?.tags ?? []).join(' ')}`.toLowerCase();
 		return haystack.includes(searchValue.toLowerCase());
 	});
+	$: remoteActiveDownloads = Object.entries(remotePullStatuses)
+		.filter(([model]) => !(model in $MODEL_DOWNLOAD_POOL))
+		.filter(([, state]: [string, any]) => state?.status && !isTerminalPullStatus(state.status))
+		.map(([model, state]: [string, any]) => {
+			let progress = null;
+			if (state?.total && typeof state?.completed === 'number' && state.total > 0) {
+				progress = Math.max(0, Math.min(100, Math.round((state.completed / state.total) * 100)));
+			}
+			return { model, state, progress };
+		});
+	$: if (show && !pullStatusTimer) {
+		pullStatusTimer = setInterval(() => {
+			refreshRemotePullStatuses();
+		}, 3000);
+	}
+	$: if (!show && pullStatusTimer) {
+		clearInterval(pullStatusTimer);
+		pullStatusTimer = null;
+	}
 
 	$: visibleStart = Math.max(0, Math.floor(listScrollTop / ITEM_HEIGHT) - OVERSCAN);
 	$: visibleEnd = Math.min(
@@ -795,14 +915,39 @@
 											<div class="truncate text-[0.7rem] text-gray-500 dark:text-gray-400">
 												{model.alias}
 											</div>
+											{#if getRemotePullState(model)?.status}
+												<div
+													class={`truncate text-[0.7rem] ${pullStatusTextClass(getRemotePullState(model)?.status)}`}
+												>
+													{getRemotePullState(model).status}
+													{#if getRemotePullProgress(model) !== null}
+														&nbsp;({getRemotePullProgress(model)}%)
+													{/if}
+												</div>
+												{#if getRemotePullProgress(model) !== null}
+													<div class="mt-1 h-1 w-28 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+														<div
+															class={`h-full rounded-full ${pullProgressBarClass(
+																getRemotePullState(model)?.status
+															)}`}
+															style={`width: ${getRemotePullProgress(model)}%`}
+														></div>
+													</div>
+												{/if}
+											{/if}
 										</div>
 										<button
 											class="shrink-0 ml-2 rounded-lg px-2 py-1 text-xs font-medium bg-gray-900 text-white dark:bg-white dark:text-gray-900"
+											disabled={isRemotelyDownloading(model)}
 											on:click={() => {
 												pullModelByName(model.alias);
 											}}
 										>
-											{$i18n.t('Download')}
+											{#if isRemotelyDownloading(model)}
+												{$i18n.t('Downloading')}
+											{:else}
+												{$i18n.t('Download')}
+											{/if}
 										</button>
 									</div>
 								{/each}
@@ -858,6 +1003,14 @@
 												{$MODEL_DOWNLOAD_POOL[model].digest}
 											</div>
 										{/if}
+											{#if 'pullProgress' in $MODEL_DOWNLOAD_POOL[model]}
+												<div class="mt-1 h-1.5 w-36 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+													<div
+														class="h-full rounded-full bg-amber-500 transition-all duration-300"
+														style={`width: ${$MODEL_DOWNLOAD_POOL[model].pullProgress}%`}
+													></div>
+												</div>
+											{/if}
 									</div>
 								</div>
 
@@ -890,6 +1043,67 @@
 										</button>
 									</Tooltip>
 								</div>
+							</div>
+						{/each}
+
+						{#each remoteActiveDownloads as remoteDownload}
+							<div
+								class="flex w-full justify-between font-medium select-none rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 rounded-xl data-highlighted:bg-muted"
+							>
+								<div class="flex">
+									<div class="mr-2.5 translate-y-0.5">
+										<Spinner />
+									</div>
+									<div class="flex flex-col self-start">
+										<div class="flex gap-1">
+											<div class="line-clamp-1">
+												{#if isFailedPullStatus(remoteDownload.state?.status)}
+													Download failed "{remoteDownload.model}"
+												{:else}
+													Downloading "{remoteDownload.model}"
+												{/if}
+											</div>
+											<div class="shrink-0">
+												{remoteDownload.progress !== null ? `(${remoteDownload.progress}%)` : ''}
+											</div>
+										</div>
+										{#if remoteDownload.state?.status}
+											<div class={`text-[0.7rem] ${pullStatusTextClass(remoteDownload.state?.status)}`}>
+												{remoteDownload.state.status}
+											</div>
+										{/if}
+										{#if remoteDownload.progress !== null}
+											<div class="mt-1 h-1.5 w-36 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
+												<div
+													class={`h-full rounded-full transition-all duration-300 ${pullProgressBarClass(
+														remoteDownload.state?.status
+													)}`}
+													style={`width: ${remoteDownload.progress}%`}
+												></div>
+											</div>
+										{/if}
+										{#if remoteDownload.state?.error}
+											<div class="text-[0.7rem] text-red-600 dark:text-red-300 line-clamp-2">
+												{remoteDownload.state.error}
+											</div>
+										{/if}
+										{#if remoteDownload.state?.digest}
+											<div class="-mt-1 h-fit text-[0.7rem] dark:text-gray-500 line-clamp-1">
+												{remoteDownload.state.digest}
+											</div>
+										{/if}
+									</div>
+								</div>
+								{#if isFailedPullStatus(remoteDownload.state?.status)}
+									<div class="mr-2 ml-1 translate-y-0.5">
+										<button
+											class="rounded-md px-2 py-1 text-xs border border-red-500 bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300"
+											on:click={() => cleanupRemotePullModel(remoteDownload.model)}
+										>
+											{$i18n.t('Delete')}
+										</button>
+									</div>
+								{/if}
 							</div>
 						{/each}
 					</div>

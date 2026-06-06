@@ -517,6 +517,30 @@ async def get_ollama_pull_status(
     return await send_request(f'{url}/api/pull/status{suffix}', 'GET', key=key, user=user)
 
 
+@router.post('/api/pull/control')
+@router.post('/api/pull/control/{url_idx}')
+async def control_ollama_pull(
+    request: Request,
+    form_data: dict,
+    url_idx: Optional[int] = None,
+    user=Depends(get_admin_user),
+):
+    if not request.app.state.config.ENABLE_OLLAMA_API:
+        raise HTTPException(status_code=503, detail=ERROR_MESSAGES.OLLAMA_API_DISABLED)
+
+    if url_idx is None:
+        url_idx = 0
+
+    url = request.app.state.config.OLLAMA_BASE_URLS[url_idx]
+    key = get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS)
+    return await send_request(
+        f'{url}/api/pull/control',
+        payload=json.dumps(form_data),
+        key=key,
+        user=user,
+    )
+
+
 @router.get('/api/ps')
 async def get_ollama_loaded_models(request: Request, user=Depends(get_admin_user)):
     """
