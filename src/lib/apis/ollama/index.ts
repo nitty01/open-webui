@@ -238,11 +238,78 @@ export const getOllamaModels = async (token: string = '', urlIdx: null | number 
 		});
 };
 
-export const getOllamaCatalogue = async (token: string = '', urlIdx: null | number = null) => {
+export const getOllamaCatalogue = async (
+	token: string = '',
+	urlIdx: null | number = null,
+	options: {
+		q?: string;
+		live?: boolean;
+		refresh?: boolean;
+		trusted_only?: boolean;
+		min_downloads?: number;
+		min_likes?: number;
+		quality?: 'off' | 'strict' | string;
+		raw?: boolean;
+	} = {}
+) => {
 	let error = null;
+	const searchParams = new URLSearchParams();
+	if (options.q) searchParams.append('q', options.q);
+	if (options.live !== undefined) searchParams.append('live', String(options.live));
+	if (options.refresh !== undefined) searchParams.append('refresh', String(options.refresh));
+	if (options.trusted_only !== undefined) searchParams.append('trusted_only', String(options.trusted_only));
+	if (options.min_downloads !== undefined)
+		searchParams.append('min_downloads', String(options.min_downloads));
+	if (options.min_likes !== undefined) searchParams.append('min_likes', String(options.min_likes));
+	if (options.quality) searchParams.append('quality', options.quality);
+	const query = searchParams.toString();
 
 	const res = await fetch(
-		`${OLLAMA_API_BASE_URL}/api/catalogue${urlIdx !== null ? `/${urlIdx}` : ''}`,
+		`${OLLAMA_API_BASE_URL}/api/catalogue${urlIdx !== null ? `/${urlIdx}` : ''}${query ? `?${query}` : ''}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				...(token && { authorization: `Bearer ${token}` })
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = 'Server connection failed';
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	if (options.raw) {
+		return res;
+	}
+
+	return res?.models ?? [];
+};
+
+export const getOllamaPullStatus = async (
+	token: string = '',
+	model: string | null = null,
+	urlIdx: null | number = null
+) => {
+	let error = null;
+	const query = model ? `?model=${encodeURIComponent(model)}` : '';
+
+	const res = await fetch(
+		`${OLLAMA_API_BASE_URL}/api/pull/status${urlIdx !== null ? `/${urlIdx}` : ''}${query}`,
 		{
 			method: 'GET',
 			headers: {
@@ -271,6 +338,47 @@ export const getOllamaCatalogue = async (token: string = '', urlIdx: null | numb
 	}
 
 	return res?.models ?? [];
+};
+
+export const controlOllamaPull = async (
+	token: string = '',
+	model: string,
+	action: 'stop' | 'pause' | 'resume' | 'restart' | 'purge' | 'delete' | 'clear',
+	urlIdx: null | number = null
+) => {
+	let error = null;
+
+	const res = await fetch(
+		`${OLLAMA_API_BASE_URL}/api/pull/control${urlIdx !== null ? `/${urlIdx}` : ''}`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				...(token && { authorization: `Bearer ${token}` })
+			},
+			body: JSON.stringify({ model, action })
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = 'Server connection failed';
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
 };
 
 export const generatePrompt = async (token: string = '', model: string, conversation: string) => {
