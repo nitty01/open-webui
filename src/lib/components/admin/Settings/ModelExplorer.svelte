@@ -13,9 +13,24 @@
 
 	let loading = false;
 	let search = '';
+	let searchInput = '';
 	let view = 'all';
 	let models: any[] = [];
+	let page = 1;
+	let pageSize = 25;
+	let total: number | null = null;
+	let totalPages: number | null = null;
+	let localCount = 0;
+	let hasPrev = false;
+	let hasNext = false;
+	let sortBy = 'alias';
+	let sortDir: 'asc' | 'desc' = 'asc';
+	let capabilityFilter = '';
+	let publisherFilter = '';
+	let sourceFilter = '';
+	let fitFilter = '';
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
+	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
 	let pulling: Record<string, { status: string; progress?: number }> = {};
 	let pullStatusesRaw: any[] = [];
 	let liveDiscovery = true;
@@ -24,28 +39,60 @@
 	let minLikes = 0;
 	let qualityMode = 'off';
 	let systemProfile: { ram_gb?: number | null; gpu_vram_gb?: number | null } | null = null;
+	let liveIndexMeta: {
+		count?: number;
+		error?: string | null;
+		stale?: boolean;
+		source?: string;
+	} | null = null;
 	const ACTIVE_PROBE_WINDOW_MS = 30000;
+	const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 	let controlSelection: Record<string, string> = {};
+
+	const catalogueQueryOptions = (forceRefresh = false) => {
+		const options: Record<string, unknown> = {
+			live: liveDiscovery,
+			refresh: forceRefresh,
+			trusted_only: trustedOnly,
+			min_downloads: minDownloads,
+			min_likes: minLikes,
+			quality: qualityMode,
+			page,
+			page_size: pageSize,
+			sort_by: sortBy,
+			sort_dir: sortDir,
+			raw: true
+		};
+		const q = search.trim();
+		if (q) options.q = q;
+		if (view === 'installed') options.installed = true;
+		if (view === 'downloadable') options.downloadable = true;
+		if (capabilityFilter.trim()) options.capability = capabilityFilter.trim();
+		if (publisherFilter.trim()) options.publisher = publisherFilter.trim();
+		if (sourceFilter.trim()) options.source = sourceFilter.trim();
+		if (fitFilter.trim()) options.fit = fitFilter.trim();
+		return options;
+	};
 
 	const loadCatalogue = async (forceRefresh = false) => {
 		loading = true;
 		try {
 			const [catalogue, pullStatuses] = await Promise.all([
-				getOllamaCatalogue(localStorage.token, 0, {
-					live: liveDiscovery,
-					refresh: forceRefresh,
-					trusted_only: trustedOnly,
-					min_downloads: minDownloads,
-					min_likes: minLikes,
-					quality: qualityMode,
-					raw: true
-				}),
+				getOllamaCatalogue(localStorage.token, 0, catalogueQueryOptions(forceRefresh)),
 				getOllamaPullStatus(localStorage.token, null, 0)
 			]);
 			pullStatusesRaw = pullStatuses ?? [];
 
 			const statusMap = Object.fromEntries((pullStatuses ?? []).map((s) => [s.model, s]));
 			systemProfile = catalogue?.system_profile ?? null;
+			liveIndexMeta = catalogue?.live_index ?? null;
+			total = catalogue?.total ?? null;
+			localCount = catalogue?.local_count ?? 0;
+			page = catalogue?.page ?? page;
+			pageSize = catalogue?.page_size ?? pageSize;
+			totalPages = catalogue?.total_pages ?? null;
+			hasPrev = catalogue?.has_prev ?? false;
+			hasNext = catalogue?.has_next ?? false;
 			models = (catalogue?.models ?? []).map((m) => {
 				const pullStatus = m.pull_status ?? statusMap[m.alias] ?? statusMap[m.installed_as];
 				return { ...m, pull_status: pullStatus };
@@ -58,21 +105,40 @@
 		}
 	};
 
-	const modelMatches = (m: any) => {
-		const q = search.trim().toLowerCase();
-		if (!q) return true;
-		const blob = [
-			m.alias,
-			m.display_name,
-			m.repo,
-			m.filename,
-			...(m.tags ?? []),
-			...(deriveCapabilities(m) ?? [])
-		]
-			.filter(Boolean)
-			.join(' ')
-			.toLowerCase();
-		return blob.includes(q);
+	const scheduleSearch = () => {
+		if (searchDebounce) clearTimeout(searchDebounce);
+		searchDebounce = setTimeout(async () => {
+			search = searchInput;
+			page = 1;
+			await loadCatalogue();
+		}, 350);
+	};
+
+	const goToPage = async (nextPage: number) => {
+		if (nextPage < 1 || (totalPages > 0 && nextPage > totalPages)) return;
+		page = nextPage;
+		await loadCatalogue();
+	};
+
+	const toggleSort = async (field: string) => {
+		if (sortBy === field) {
+			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortBy = field;
+			sortDir = 'asc';
+		}
+		page = 1;
+		await loadCatalogue();
+	};
+
+	const sortIndicator = (field: string) => {
+		if (sortBy !== field) return '';
+		return sortDir === 'asc' ? ' ↑' : ' ↓';
+	};
+
+	const applyFilters = async () => {
+		page = 1;
+		await loadCatalogue(true);
 	};
 
 	const deriveCapabilities = (m: any) => {
@@ -400,11 +466,8 @@
 		}
 	};
 
-	$: filtered = models
-		.filter((m) => (view === 'installed' ? m.installed : view === 'downloadable' ? m.downloadable : true))
-		.filter((m) => modelMatches(m));
-
 	onMount(async () => {
+		searchInput = search;
 		await loadCatalogue();
 		pollTimer = setInterval(() => {
 			loadCatalogue(false);
@@ -413,6 +476,7 @@
 
 	onDestroy(() => {
 		if (pollTimer) clearInterval(pollTimer);
+		if (searchDebounce) clearTimeout(searchDebounce);
 	});
 </script>
 
@@ -436,24 +500,40 @@
 			{$i18n.t('System profile')}: RAM {systemProfile?.ram_gb ?? 'unknown'} GB, GPU VRAM {systemProfile?.gpu_vram_gb ?? 'unknown'} GB
 		</div>
 	{/if}
+	{#if liveDiscovery && liveIndexMeta}
+		<div class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t('HF live index')}: {liveIndexMeta?.count ?? 0}
+			{#if liveIndexMeta?.stale}
+				<span class="text-amber-600 dark:text-amber-300"> · {$i18n.t('stale cache')}</span>
+			{/if}
+			{#if liveIndexMeta?.error}
+				<span class="text-red-600 dark:text-red-300"> · {liveIndexMeta.error}</span>
+			{/if}
+		</div>
+	{/if}
 
 	<div class="mb-3 flex flex-col gap-2 lg:flex-row lg:flex-wrap">
 		<input
 			class="flex-1 px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
-			placeholder={$i18n.t('Search by alias, repo, tags, capabilities...')}
-			bind:value={search}
+			placeholder={$i18n.t('Search (repo:, publisher:, tag:, capability:, fit:)')}
+			bind:value={searchInput}
+			on:input={scheduleSearch}
 		/>
-		<select class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden" bind:value={view}>
+		<select
+			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
+			bind:value={view}
+			on:change={applyFilters}
+		>
 			<option value="all">{$i18n.t('All')}</option>
 			<option value="installed">{$i18n.t('Installed')}</option>
 			<option value="downloadable">{$i18n.t('Downloadable')}</option>
 		</select>
 		<label class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 inline-flex items-center gap-2">
-			<input type="checkbox" bind:checked={liveDiscovery} on:change={() => loadCatalogue(true)} />
+			<input type="checkbox" bind:checked={liveDiscovery} on:change={applyFilters} />
 			{$i18n.t('Include live discovery')}
 		</label>
 		<label class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 inline-flex items-center gap-2">
-			<input type="checkbox" bind:checked={trustedOnly} on:change={() => loadCatalogue(true)} />
+			<input type="checkbox" bind:checked={trustedOnly} on:change={applyFilters} />
 			{$i18n.t('Trusted publishers only')}
 		</label>
 		<label class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 inline-flex items-center gap-2">
@@ -463,7 +543,7 @@
 				min="0"
 				class="w-24 bg-transparent outline-hidden"
 				bind:value={minDownloads}
-				on:change={() => loadCatalogue(true)}
+				on:change={applyFilters}
 			/>
 		</label>
 		<label class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 inline-flex items-center gap-2">
@@ -473,17 +553,107 @@
 				min="0"
 				class="w-20 bg-transparent outline-hidden"
 				bind:value={minLikes}
-				on:change={() => loadCatalogue(true)}
+				on:change={applyFilters}
 			/>
 		</label>
 		<select
 			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
 			bind:value={qualityMode}
-			on:change={() => loadCatalogue(true)}
+			on:change={applyFilters}
 		>
 			<option value="off">{$i18n.t('Quality filter off')}</option>
 			<option value="strict">{$i18n.t('Strict quality')}</option>
 		</select>
+		<input
+			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
+			placeholder={$i18n.t('Capability filter')}
+			bind:value={capabilityFilter}
+			on:change={applyFilters}
+		/>
+		<input
+			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
+			placeholder={$i18n.t('Publisher filter')}
+			bind:value={publisherFilter}
+			on:change={applyFilters}
+		/>
+		<input
+			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
+			placeholder={$i18n.t('Source filter')}
+			bind:value={sourceFilter}
+			on:change={applyFilters}
+		/>
+		<select
+			class="px-3 py-2 rounded-xl bg-gray-100 dark:bg-gray-850 outline-hidden"
+			bind:value={fitFilter}
+			on:change={applyFilters}
+		>
+			<option value="">{$i18n.t('Any fit')}</option>
+			<option value="recommended">{$i18n.t('Recommended')}</option>
+			<option value="possible">{$i18n.t('Possible')}</option>
+			<option value="not_recommended">{$i18n.t('Not recommended')}</option>
+		</select>
+	</div>
+
+	<div class="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
+		<div>
+			{#if total != null}
+				{$i18n.t('Showing {{count}} of {{total}} models', { count: models.length, total })}
+				{#if totalPages != null && totalPages > 0}
+					<span> · {$i18n.t('Page {{page}} of {{pages}}', { page, pages: totalPages })}</span>
+				{/if}
+			{:else}
+				{$i18n.t('{{count}} models on this page', { count: models.length })}
+				<span> · {$i18n.t('Page {{page}}', { page })}</span>
+				{#if hasNext}
+					<span> · {$i18n.t('more available from Hugging Face')}</span>
+				{/if}
+				{#if localCount > 0}
+					<span> · {localCount} {$i18n.t('local')}</span>
+				{/if}
+			{/if}
+		</div>
+		<div class="flex items-center gap-2">
+			<label class="inline-flex items-center gap-1.5">
+				{$i18n.t('Page size')}
+				<select
+					class="px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-850 outline-hidden"
+					bind:value={pageSize}
+					on:change={applyFilters}
+				>
+					{#each PAGE_SIZE_OPTIONS as size}
+						<option value={size}>{size}</option>
+					{/each}
+				</select>
+			</label>
+			<button
+				class="px-2 py-1 rounded-lg border border-gray-300 dark:border-gray-700 disabled:opacity-40"
+				disabled={!hasPrev || loading}
+				on:click={() => goToPage(1)}
+			>
+				{$i18n.t('First')}
+			</button>
+			<button
+				class="px-2 py-1 rounded-lg border border-gray-300 dark:border-gray-700 disabled:opacity-40"
+				disabled={!hasPrev || loading}
+				on:click={() => goToPage(page - 1)}
+			>
+				{$i18n.t('Prev')}
+			</button>
+			<button
+				class="px-2 py-1 rounded-lg border border-gray-300 dark:border-gray-700 disabled:opacity-40"
+				disabled={!hasNext || loading}
+				on:click={() => goToPage(page + 1)}
+			>
+				{$i18n.t('Next')}
+			</button>
+			<button
+				class="px-2 py-1 rounded-lg border border-gray-300 dark:border-gray-700 disabled:opacity-40"
+				disabled={!hasNext || loading}
+				on:click={() => goToPage(totalPages)}
+			>
+				{$i18n.t('Last')}
+			</button>
+		</div>
 	</div>
 
 	<div class="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden">
@@ -557,20 +727,32 @@
 			<table class="w-full text-left text-xs">
 				<thead class="sticky top-0 bg-gray-50 dark:bg-gray-900/95">
 					<tr class="border-b border-gray-200 dark:border-gray-800">
-						<th class="px-3 py-2">{$i18n.t('Model')}</th>
+						<th class="px-3 py-2">
+							<button class="font-medium" on:click={() => toggleSort('display_name')}>
+								{$i18n.t('Model')}{sortIndicator('display_name')}
+							</button>
+						</th>
 						<th class="px-3 py-2">{$i18n.t('Capabilities')}</th>
-						<th class="px-3 py-2">{$i18n.t('Metadata')}</th>
-						<th class="px-3 py-2">{$i18n.t('Status')}</th>
+						<th class="px-3 py-2">
+							<button class="font-medium" on:click={() => toggleSort('downloads')}>
+								{$i18n.t('Metadata')}{sortIndicator('downloads')}
+							</button>
+						</th>
+						<th class="px-3 py-2">
+							<button class="font-medium" on:click={() => toggleSort('fit')}>
+								{$i18n.t('Status')}{sortIndicator('fit')}
+							</button>
+						</th>
 						<th class="px-3 py-2">{$i18n.t('Actions')}</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#if loading && filtered.length === 0}
+					{#if loading && models.length === 0}
 						<tr><td class="px-3 py-3 text-gray-500" colspan="5">{$i18n.t('Loading...')}</td></tr>
-					{:else if filtered.length === 0}
+					{:else if models.length === 0}
 						<tr><td class="px-3 py-3 text-gray-500" colspan="5">{$i18n.t('No models found')}</td></tr>
 					{:else}
-						{#each filtered as m (m.alias)}
+						{#each models as m (m.alias)}
 							<tr class="border-b border-gray-100 dark:border-gray-850 align-top">
 								<td class="px-3 py-2 min-w-[220px]">
 									<div class="font-medium">{m.display_name ?? m.alias}</div>

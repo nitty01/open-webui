@@ -238,6 +238,20 @@ export const getOllamaModels = async (token: string = '', urlIdx: null | number 
 		});
 };
 
+export type OllamaCatalogueEnvelope = {
+	models: any[];
+	total: number;
+	page: number;
+	page_size: number;
+	total_pages: number;
+	has_prev: boolean;
+	has_next: boolean;
+	system_profile?: {
+		ram_gb?: number | null;
+		gpu_vram_gb?: number | null;
+	};
+};
+
 export const getOllamaCatalogue = async (
 	token: string = '',
 	urlIdx: null | number = null,
@@ -249,6 +263,16 @@ export const getOllamaCatalogue = async (
 		min_downloads?: number;
 		min_likes?: number;
 		quality?: 'off' | 'strict' | string;
+		page?: number;
+		page_size?: number;
+		sort_by?: string;
+		sort_dir?: 'asc' | 'desc' | string;
+		installed?: boolean;
+		downloadable?: boolean;
+		capability?: string;
+		publisher?: string;
+		source?: string;
+		fit?: string;
 		raw?: boolean;
 	} = {}
 ) => {
@@ -262,6 +286,17 @@ export const getOllamaCatalogue = async (
 		searchParams.append('min_downloads', String(options.min_downloads));
 	if (options.min_likes !== undefined) searchParams.append('min_likes', String(options.min_likes));
 	if (options.quality) searchParams.append('quality', options.quality);
+	if (options.page !== undefined) searchParams.append('page', String(options.page));
+	if (options.page_size !== undefined) searchParams.append('page_size', String(options.page_size));
+	if (options.sort_by) searchParams.append('sort_by', options.sort_by);
+	if (options.sort_dir) searchParams.append('sort_dir', options.sort_dir);
+	if (options.installed !== undefined) searchParams.append('installed', String(options.installed));
+	if (options.downloadable !== undefined)
+		searchParams.append('downloadable', String(options.downloadable));
+	if (options.capability) searchParams.append('capability', options.capability);
+	if (options.publisher) searchParams.append('publisher', options.publisher);
+	if (options.source) searchParams.append('source', options.source);
+	if (options.fit) searchParams.append('fit', options.fit);
 	const query = searchParams.toString();
 
 	const res = await fetch(

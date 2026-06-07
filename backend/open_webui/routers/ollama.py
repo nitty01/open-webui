@@ -468,6 +468,16 @@ async def get_ollama_catalogue(
     min_downloads: Optional[int] = None,
     min_likes: Optional[int] = None,
     quality: Optional[str] = None,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = None,
+    installed: Optional[bool] = None,
+    downloadable: Optional[bool] = None,
+    capability: Optional[str] = None,
+    publisher: Optional[str] = None,
+    source: Optional[str] = None,
+    fit: Optional[str] = None,
     user=Depends(get_verified_user),
 ):
     if not request.app.state.config.ENABLE_OLLAMA_API:
@@ -493,6 +503,26 @@ async def get_ollama_catalogue(
         suffix_parts.append(f'min_likes={int(min_likes)}')
     if quality:
         suffix_parts.append(f'quality={quote(quality)}')
+    if page is not None:
+        suffix_parts.append(f'page={int(page)}')
+    if page_size is not None:
+        suffix_parts.append(f'page_size={int(page_size)}')
+    if sort_by:
+        suffix_parts.append(f'sort_by={quote(sort_by)}')
+    if sort_dir:
+        suffix_parts.append(f'sort_dir={quote(sort_dir)}')
+    if installed is not None:
+        suffix_parts.append(f'installed={str(installed).lower()}')
+    if downloadable is not None:
+        suffix_parts.append(f'downloadable={str(downloadable).lower()}')
+    if capability:
+        suffix_parts.append(f'capability={quote(capability)}')
+    if publisher:
+        suffix_parts.append(f'publisher={quote(publisher)}')
+    if source:
+        suffix_parts.append(f'source={quote(source)}')
+    if fit:
+        suffix_parts.append(f'fit={quote(fit)}')
     suffix = f"?{'&'.join(suffix_parts)}" if suffix_parts else ''
     return await send_request(f'{url}/api/catalogue{suffix}', 'GET', key=key, user=user)
 
